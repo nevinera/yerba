@@ -31,6 +31,7 @@ pub struct LocatedNode {
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use rowan::ast::AstNode;
 use rowan::{TextRange, TextSize};
@@ -130,6 +131,7 @@ pub enum InsertPosition {
 pub struct Document {
   root: SyntaxNode,
   path: Option<PathBuf>,
+  line_index: OnceLock<LineIndex>,
 }
 
 impl Document {
@@ -138,7 +140,11 @@ impl Document {
 
     check_duplicate_keys(&tree)?;
 
-    Ok(Document { root: tree, path: None })
+    Ok(Document {
+      root: tree,
+      path: None,
+      line_index: OnceLock::new(),
+    })
   }
 
   pub fn parse_file(path: impl AsRef<Path>) -> Result<Self, YerbaError> {
@@ -475,6 +481,12 @@ impl Document {
     self.root.text().to_string()
   }
 
+  /// Line starts for the current source, built on first use. Every edit reparses
+  /// into a fresh `Document`, which discards this along with the old tree.
+  fn line_index(&self) -> &LineIndex {
+    self.line_index.get_or_init(|| LineIndex::new(&self.source_text()))
+  }
+
   fn reparse(&mut self, new_source: &str) -> Result<(), YerbaError> {
     let document = Self::parse(new_source)?;
     let path = self.path.take();
@@ -526,21 +538,7 @@ fn check_duplicate_keys(root: &SyntaxNode) -> Result<(), YerbaError> {
   Ok(())
 }
 
-pub(crate) fn compute_location(source: &str, start_offset: usize, end_offset: usize) -> Location {
-  let start = start_offset.min(source.len());
-  let end = end_offset.min(source.len());
-
-  Location {
-    start_offset: start,
-    end_offset: end,
-    start_line: line_at(source, start),
-    start_column: column_at(source, start),
-    end_line: line_at(source, end),
-    end_column: column_at(source, end),
-  }
-}
-
-pub(crate) fn compute_location_indexed(index: &LineIndex, start_offset: usize, end_offset: usize) -> Location {
+pub(crate) fn compute_location(index: &LineIndex, start_offset: usize, end_offset: usize) -> Location {
   let start = start_offset.min(index.source_length());
   let end = end_offset.min(index.source_length());
 
