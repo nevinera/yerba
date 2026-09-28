@@ -2,6 +2,7 @@ mod condition;
 mod delete;
 mod get;
 mod insert;
+mod key_index;
 mod set;
 mod sort;
 mod unique;
@@ -32,6 +33,8 @@ pub struct LocatedNode {
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use key_index::KeyIndex;
 
 use rowan::ast::AstNode;
 use rowan::{TextRange, TextSize};
@@ -132,6 +135,7 @@ pub struct Document {
   root: SyntaxNode,
   path: Option<PathBuf>,
   line_index: OnceLock<LineIndex>,
+  key_index: KeyIndex,
 }
 
 impl Document {
@@ -144,6 +148,7 @@ impl Document {
       root: tree,
       path: None,
       line_index: OnceLock::new(),
+      key_index: KeyIndex::default(),
     })
   }
 
@@ -250,13 +255,13 @@ impl Document {
         match maybe_node {
           None => next_nodes.push(None),
           Some(node) => {
-            let resolved = resolve_segment(node, segment);
+            let resolved = resolve_segment(node, segment, Some(&self.key_index));
 
             if is_wildcard && has_remaining {
               let remaining = &segments[i + 1..];
 
               for item in &resolved {
-                let results = navigate_remaining(item, remaining);
+                let results = navigate_remaining(item, remaining, Some(&self.key_index));
 
                 if results.is_empty() {
                   next_nodes.push(None);
@@ -680,14 +685,14 @@ pub(crate) fn parse_condition(condition: &str) -> Option<(String, &str, String)>
   Some((left.to_string(), operator, right.to_string()))
 }
 
-fn navigate_remaining(node: &SyntaxNode, segments: &[crate::selector::SelectorSegment]) -> Vec<SyntaxNode> {
+fn navigate_remaining(node: &SyntaxNode, segments: &[crate::selector::SelectorSegment], keys: Option<&KeyIndex>) -> Vec<SyntaxNode> {
   let mut current_nodes = vec![node.clone()];
 
   for segment in segments {
     let mut next_nodes = Vec::new();
 
     for current in &current_nodes {
-      next_nodes.extend(resolve_segment(current, segment));
+      next_nodes.extend(resolve_segment(current, segment, keys));
     }
 
     if next_nodes.is_empty() {
@@ -700,7 +705,7 @@ fn navigate_remaining(node: &SyntaxNode, segments: &[crate::selector::SelectorSe
   current_nodes
 }
 
-fn resolve_segment(node: &SyntaxNode, segment: &crate::selector::SelectorSegment) -> Vec<SyntaxNode> {
+fn resolve_segment(node: &SyntaxNode, segment: &crate::selector::SelectorSegment, keys: Option<&KeyIndex>) -> Vec<SyntaxNode> {
   use crate::selector::SelectorSegment;
 
   match segment {
@@ -743,10 +748,13 @@ fn resolve_segment(node: &SyntaxNode, segment: &crate::selector::SelectorSegment
 
     SelectorSegment::Key(key) => {
       if let Some(map) = find_block_map(node) {
-        if let Some(entry) = find_entry_by_key(&map, key) {
-          if let Some(value) = entry.value() {
-            return vec![value.syntax().clone()];
-          }
+        let entry = match keys {
+          Some(keys) => keys.find(&map, key),
+          None => find_entry_by_key(&map, key),
+        };
+
+        if let Some(value) = entry.and_then(|entry| entry.value()) {
+          return vec![value.syntax().clone()];
         }
 
         return Vec::new();
@@ -768,7 +776,7 @@ fn resolve_segment(node: &SyntaxNode, segment: &crate::selector::SelectorSegment
 pub(crate) fn navigate_from_node(node: &SyntaxNode, path: &str) -> Vec<SyntaxNode> {
   let parsed = crate::selector::Selector::parse(path);
 
-  navigate_remaining(node, parsed.segments())
+  navigate_remaining(node, parsed.segments(), None)
 }
 
 #[derive(Debug, Clone)]
